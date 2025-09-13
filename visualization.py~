@@ -1,0 +1,233 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import cv2
+from matplotlib.patches import Rectangle
+from PIL import Image
+import seaborn as sns
+from collections import Counter
+from sklearn.metrics import confusion_matrix, classification_report
+import os
+
+
+def plot_dataset_stats(merged_dataset, save_path='dataset_stats.png'):
+    """Plot dataset statistics: number of clips per split and label distributions."""
+    splits = ['train', 'val', 'test']
+    clip_counts = [len(merged_dataset[split]) for split in splits]
+
+    # Label distributions
+    all_group_labels = []
+    for split in splits:
+        for clip in merged_dataset[split]:
+            all_group_labels.append(clip['group_label'])
+
+    label_counts = Counter(all_group_labels)
+    unique_labels = sorted(label_counts.keys())
+    label_names = [f'Label_{i}' for i in unique_labels]  # Replace with actual names if available
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Clips per split
+    ax1.bar(splits, clip_counts, color=['blue', 'orange', 'green'])
+    ax1.set_title('Number of Clips per Split')
+    ax1.set_ylabel('Number of Clips')
+    for i, v in enumerate(clip_counts):
+        ax1.text(i, v + 1, str(v), ha='center')
+
+    # Label distribution
+    ax2.bar(range(len(label_counts)), [label_counts[i] for i in unique_labels], color='skyblue')
+    ax2.set_title('Group Label Distribution')
+    ax2.set_xlabel('Group Labels')
+    ax2.set_ylabel('Count')
+    ax2.set_xticks(range(len(label_counts)))
+    ax2.set_xticklabels(label_names, rotation=45)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Dataset stats saved to {save_path}")
+
+
+def visualize_sample_clip(clip, frame_idx=4, save_path='sample_clip.png'):
+    """Visualize a sample frame from a clip with bounding boxes and labels."""
+    frame_path = clip['frame_paths'][frame_idx]
+    frame = cv2.imread(frame_path)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    # Create figure
+    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+    ax.imshow(frame_rgb)
+    ax.set_title(f"Video {clip['video_idx']}, Clip {clip['clip_id']}\nGroup: {clip['group_label']}")
+    ax.axis('off')
+
+    # Draw bounding boxes
+    for i, player in enumerate(clip['players']):
+        x, y, w, h = player['bbox']
+        rect = Rectangle((x, y), w, h, linewidth=2, edgecolor='red', facecolor='none')
+        ax.add_patch(rect)
+        # Add action label
+        ax.text(x, y - 10, f"Player {i + 1}: {player['action']}",
+                color='red', fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Sample clip visualization saved to {save_path}")
+
+
+def plot_training_history(train_losses, val_losses, train_accs, val_accs, save_path='training_history.png'):
+    """Plot training and validation loss/accuracy curves."""
+    epochs = range(1, len(train_losses) + 1)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Loss plot
+    ax1.plot(epochs, train_losses, 'b-', label='Train Loss')
+    ax1.plot(epochs, val_losses, 'r-', label='Val Loss')
+    ax1.set_title('Model Loss')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    ax1.grid(True)
+
+    # Accuracy plot
+    ax2.plot(epochs, train_accs, 'b-', label='Train Acc')
+    ax2.plot(epochs, val_accs, 'r-', label='Val Acc')
+    ax2.set_title('Model Accuracy')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Accuracy (%)')
+    ax2.legend()
+    ax2.grid(True)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Training history saved to {save_path}")
+
+
+def plot_confusion_matrix(y_true, y_pred, class_names, save_path='confusion_matrix.png'):
+    """Plot confusion matrix."""
+    cm = confusion_matrix(y_true, y_pred)
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=class_names, yticklabels=class_names)
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Confusion matrix saved to {save_path}")
+
+
+def plot_feature_maps(model, sample_image, layer_name='layer4', save_path='feature_maps.png', num_maps=16):
+    """Visualize feature maps from a specific layer."""
+    # Hook to capture activations
+    activations = {}
+
+    def hook_fn(name):
+        def hook(module, input, output):
+            activations[name] = output
+
+        return hook
+
+    # Register hook
+    if hasattr(model.backbone, layer_name):
+        handle = getattr(model.backbone, layer_name).register_forward_hook(hook_fn(layer_name))
+    else:
+        print(f"Layer {layer_name} not found. Available layers: {[n for n, m in model.backbone.named_children()]}")
+        return
+
+    # Forward pass
+    model.eval()
+    with torch.no_grad():
+        sample_image = sample_image.unsqueeze(0).to(next(model.parameters()).device)
+        _ = model(sample_image)
+
+    # Remove hook
+    handle.remove()
+
+    # Plot feature maps
+    if layer_name in activations:
+        feature_maps = activations[layer_name]
+        # Take first sample and first few channels
+        fmap = feature_maps[0].cpu().numpy()
+
+        # Create subplots
+        cols = min(num_maps, fmap.shape[0])
+        rows = (num_maps + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 4 * rows))
+        if rows == 1 and cols == 1:
+            axes = [axes]
+        elif rows == 1:
+            axes = axes.reshape(1, -1)
+        elif cols == 1:
+            axes = axes.reshape(-1, 1)
+
+        for i in range(num_maps):
+            if i < fmap.shape[0]:
+                row = i // cols
+                col = i % cols
+                axes[row, col].imshow(fmap[i], cmap='viridis')
+                axes[row, col].set_title(f'Channel {i}')
+                axes[row, col].axis('off')
+            else:
+                axes[row, col].axis('off')
+
+        plt.suptitle(f'Feature Maps from {layer_name}')
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        print(f"Feature maps saved to {save_path}")
+    else:
+        print("No activations captured.")
+
+
+def create_visualization_report(merged_dataset, model, test_loader, class_names, output_dir='visualizations'):
+    """Create a comprehensive visualization report."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1. Dataset stats
+    plot_dataset_stats(merged_dataset, os.path.join(output_dir, 'dataset_stats.png'))
+
+    # 2. Sample clip visualization
+    if merged_dataset['test']:
+        sample_clip = merged_dataset['test'][0]
+        visualize_sample_clip(sample_clip, save_path=os.path.join(output_dir, 'sample_clip.png'))
+
+    # 3. Model predictions on test set
+    model.eval()
+    y_true = []
+    y_pred = []
+    sample_images = []
+
+    with torch.no_grad():
+        for batch in test_loader:
+            frames = batch['frames'].to(next(model.parameters()).device)
+            labels = batch['group_label']
+
+            logits = model(frames)
+            _, preds = logits.max(1)
+
+            y_true.extend(labels.cpu().numpy())
+            y_pred.extend(preds.cpu().numpy())
+
+            # Save some sample images for visualization
+            if len(sample_images) < 5:
+                sample_images.extend(frames.cpu())
+
+    # 4. Confusion matrix
+    plot_confusion_matrix(y_true, y_pred, class_names, os.path.join(output_dir, 'confusion_matrix.png'))
+
+    # 5. Classification report (text)
+    report = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
+    with open(os.path.join(output_dir, 'classification_report.txt'), 'w') as f:
+        f.write(classification_report(y_true, y_pred, target_names=class_names))
+
+    # 6. Feature maps for sample image
+    if sample_images:
+        sample_img = sample_images[0].squeeze(0)  # Remove batch and time dims
+        plot_feature_maps(model, sample_img, save_path=os.path.join(output_dir, 'feature_maps.png'))
+
+    print(f"Comprehensive visualization report created in {output_dir}/")
